@@ -69,7 +69,7 @@ def send_telegram(message):
                 })
                 time.sleep(0.5)
         else:
-            requests.post(url, json={
+            requests.post(url, json={...}, timeout=10)
                 'chat_id': CHAT_ID,
                 'text': message,
                 'parse_mode': 'HTML',
