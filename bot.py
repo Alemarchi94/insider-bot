@@ -4,153 +4,144 @@ import os
 from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 import time
+import re
+from collections import defaultdict
 
 TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
 CHAT_ID = os.environ['CHAT_ID']
 SEEN_FILE = 'seen_transactions.json'
+CACHE_13F_FILE = 'cache_13f.json'
 
-# User-Agent obbligatorio per SEC
 HEADERS = {
-    'User-Agent': 'Alessandro Marchi alessadro94marchi@gmail.com',  
+    'User-Agent': 'Alessandro Marchi alessandro94marchi@gmail.com',
     'Accept-Encoding': 'gzip, deflate',
     'Host': 'www.sec.gov'
 }
 
-# Fondi/investitori famosi da monitorare
 NOTABLE_INVESTORS = [
-    'berkshire hathaway',
-    'warren buffett',
-    'scion',
-    'michael burry',
-    'burry',
-    'bill ackman',
-    'pershing square',
-    'carl icahn',
-    'icahn enterprises',
-    'bridgewater',
-    'ray dalio',
-    'renaissance technologies',
-    'citadel',
-    'ken griffin',
-    'tiger global',
-    'coatue',
-    'greenlight',
-    'david einhorn',
-    'baupost',
-    'seth klarman',
-    'third point',
-    'dan loeb',
-    'elliott management',
-    'paul singer',
-    'appaloosa',
-    'david tepper',
-    'lone pine',
-    'viking global',
-    'millennium',
-    'point72',
-    'steve cohen',
-    'two sigma',
-    'de shaw',
-    'aqr',
-    'paulson',
-    'john paulson',
-    'soros',
-    'george soros',
-    'stanley druckenmiller',
-    'duquesne',
-    'bill miller',
-    'bill gates',
-    'cascade investment',
-    'jeff bezos',
-    'mark zuckerberg',
-    'elon musk',
-    'larry ellison',
-    'jim simons',
-    'chase coleman',
-    'tiger cub',
-    'sequoia',
-    'a16z',
-    'andreessen horowitz'
+    'berkshire hathaway', 'warren buffett', 'scion', 'michael burry', 'burry',
+    'bill ackman', 'pershing square', 'carl icahn', 'icahn enterprises',
+    'bridgewater', 'ray dalio', 'renaissance technologies', 'citadel', 'ken griffin',
+    'tiger global', 'coatue', 'greenlight', 'david einhorn', 'baupost', 'seth klarman',
+    'third point', 'dan loeb', 'elliott management', 'paul singer', 'appaloosa',
+    'david tepper', 'lone pine', 'viking global', 'millennium', 'point72', 'steve cohen',
+    'two sigma', 'de shaw', 'aqr', 'paulson', 'john paulson', 'soros', 'george soros',
+    'stanley druckenmiller', 'duquesne', 'bill miller', 'bill gates', 'cascade investment',
+    'jeff bezos', 'mark zuckerberg', 'elon musk', 'larry ellison', 'jim simons',
+    'chase coleman', 'sequoia', 'a16z', 'andreessen horowitz'
 ]
 
-def load_seen():
+def load_json_file(filepath):
     try:
-        with open(SEEN_FILE, 'r') as f:
-            return set(json.load(f))
+        with open(filepath, 'r') as f:
+            return json.load(f)
     except:
-        return set()
+        return {}
+
+def save_json_file(filepath, data):
+    with open(filepath, 'w') as f:
+        json.dump(data, f)
+
+def load_seen():
+    return set(load_json_file(SEEN_FILE).get('seen', []))
 
 def save_seen(seen):
-    with open(SEEN_FILE, 'w') as f:
-        json.dump(list(seen), f)
+    save_json_file(SEEN_FILE, {'seen': list(seen)})
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={
-            'chat_id': CHAT_ID,
-            'text': message[:4096],
-            'parse_mode': 'HTML',
-            'disable_web_page_preview': True
-        })
+        # Split long messages
+        if len(message) > 4096:
+            parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
+            for part in parts:
+                requests.post(url, json={
+                    'chat_id': CHAT_ID,
+                    'text': part,
+                    'parse_mode': 'HTML',
+                    'disable_web_page_preview': True
+                })
+                time.sleep(0.5)
+        else:
+            requests.post(url, json={
+                'chat_id': CHAT_ID,
+                'text': message,
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True
+            })
         return True
     except Exception as e:
         print(f"Telegram error: {e}")
         return False
 
+def format_number(num):
+    """Formatta numeri grandi"""
+    if num >= 1_000_000_000:
+        return f"${num/1_000_000_000:.2f}B"
+    elif num >= 1_000_000:
+        return f"${num/1_000_000:.1f}M"
+    elif num >= 1_000:
+        return f"${num/1_000:.0f}K"
+    else:
+        return f"${num:.0f}"
+
+def parse_amount_range(amount_str):
+    ranges = {
+        '$1,001 - $15,000': '$8K',
+        '$15,001 - $50,000': '$32K',
+        '$50,001 - $100,000': '$75K',
+        '$100,001 - $250,000': '$175K',
+        '$250,001 - $500,000': '$375K',
+        '$500,001 - $1,000,000': '$750K',
+        '$1,000,001 - $5,000,000': '$3M',
+        '$5,000,001 - $25,000,000': '$15M',
+        '$25,000,001 - $50,000,000': '$37M',
+        'Over $50,000,000': '>$50M'
+    }
+    return ranges.get(amount_str, amount_str)
+
+def extract_ticker_from_title(title):
+    match = re.search(r'\(([A-Z]{1,5})\)', title)
+    return match.group(1) if match else None
+
+def extract_company_from_title(title):
+    title = re.sub(r'^(3|4|5|SC 13[DG](/A)?|13F-HR)\s*-\s*', '', title)
+    return title.split('(')[0].strip()
+
+def is_notable_investor(title):
+    title_lower = title.lower()
+    return any(name in title_lower for name in NOTABLE_INVESTORS)
+
+def is_tax_payment(trade):
+    comment = str(trade.get('comment', '')).lower()
+    return any(kw in comment for kw in ['tax', 'withholding', 'tax obligation'])
+
 def check_congressional_trades():
-    """House Stock Watcher"""
     url = "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json"
-    
     try:
         response = requests.get(url, timeout=10)
         trades = response.json()
-        
-        recent = []
         cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-        
-        for trade in trades:
-            if trade.get('disclosure_date', '') >= cutoff:
-                recent.append(trade)
-        
-        return recent
-    except Exception as e:
-        print(f"Congressional error: {e}")
+        return [t for t in trades if t.get('disclosure_date', '') >= cutoff]
+    except:
         return []
 
 def check_senate_trades():
-    """Senate stock disclosure"""
     url = "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json"
-    
     try:
         response = requests.get(url, timeout=10)
         trades = response.json()
-        
-        recent = []
         cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-        
-        for trade in trades:
-            if trade.get('disclosure_date', '') >= cutoff:
-                recent.append(trade)
-        
-        return recent
-    except Exception as e:
-        print(f"Senate error: {e}")
+        return [t for t in trades if t.get('disclosure_date', '') >= cutoff]
+    except:
         return []
 
 def check_sec_filings(form_type, days_back=2, count=100):
-    """
-    Funzione generica per controllare filing SEC
-    form_type: '3', '4', '5', 'SC13D', 'SC13G', 'SC13G/A', '13F-HR', ecc.
-    """
     filings = []
-    
     try:
         url = "https://www.sec.gov/cgi-bin/browse-edgar"
-        
         for days_ago in range(days_back):
             date = (datetime.now() - timedelta(days=days_ago)).strftime('%Y%m%d')
-            
             params = {
                 'action': 'getcurrent',
                 'type': form_type,
@@ -161,350 +152,374 @@ def check_sec_filings(form_type, days_back=2, count=100):
                 'count': count,
                 'output': 'atom'
             }
-            
-            time.sleep(0.15)  # Rate limit: 10 req/sec
-            
+            time.sleep(0.15)
             response = requests.get(url, params=params, headers=HEADERS, timeout=15)
-            
             if response.status_code != 200:
-                print(f"SEC error for {form_type}: {response.status_code}")
                 continue
-            
             root = ET.fromstring(response.content)
             ns = {'atom': 'http://www.w3.org/2005/Atom'}
-            
             for entry in root.findall('atom:entry', ns):
                 try:
-                    title = entry.find('atom:title', ns).text
-                    link = entry.find('atom:link', ns).attrib['href']
-                    updated = entry.find('atom:updated', ns).text
-                    
                     filings.append({
-                        'title': title,
-                        'link': link,
-                        'date': updated[:10],
+                        'title': entry.find('atom:title', ns).text,
+                        'link': entry.find('atom:link', ns).attrib['href'],
+                        'date': entry.find('atom:updated', ns).text[:10],
                         'type': form_type
                     })
-                except Exception as e:
-                    print(f"Parse error: {e}")
+                except:
                     continue
-        
         return filings
-    
     except Exception as e:
         print(f"Form {form_type} error: {e}")
         return []
 
-def check_form3():
-    """Form 3 - Nuovi insider (initial ownership)"""
-    return check_sec_filings('3', days_back=3, count=50)
-
-def check_form4():
-    """Form 4 - Insider transactions"""
-    return check_sec_filings('4', days_back=2, count=100)
-
-def check_form5():
-    """Form 5 - Annual insider transactions"""
-    return check_sec_filings('5', days_back=3, count=30)
-
-def check_form13d():
-    """Form 13D - Acquisizioni attiviste >5%"""
-    return check_sec_filings('SC13D', days_back=5, count=40)
-
-def check_form13g():
-    """Form 13G - Acquisizioni passive >5%"""
-    filings = []
-    filings.extend(check_sec_filings('SC13G', days_back=5, count=40))
-    filings.extend(check_sec_filings('SC13G/A', days_back=5, count=60))  # Amendments (modifiche anche sotto 5%)
-    return filings
-
-def check_form13f():
+def parse_13f_xml(filing_url):
     """
-    Form 13F-HR - Holdings trimestrali fondi >$100M
-    Questi escono ogni trimestre (45 giorni dopo fine trimestre)
+    Scarica e parsa un filing 13F-HR dalla SEC
+    Ritorna dict: {ticker: {'shares': N, 'value': $, 'name': ...}}
     """
-    return check_sec_filings('13F-HR', days_back=7, count=200)
-
-def is_notable_investor(title):
-    """Identifica investitori famosi"""
-    title_lower = title.lower()
-    return any(name in title_lower for name in NOTABLE_INVESTORS)
-
-def is_tax_payment(trade):
-    """Filtra pagamenti tasse"""
-    comment = str(trade.get('comment', '')).lower()
-    type_tx = str(trade.get('type', '')).lower()
+    try:
+        # Il link atom punta alla pagina index, dobbiamo trovare il file .xml
+        time.sleep(0.15)
+        response = requests.get(filing_url, headers=HEADERS, timeout=20)
+        
+        # Cerca il link al file informationtable.xml o primary_doc.xml
+        xml_pattern = re.search(r'href="(/Archives/edgar/data/\d+/\d+/[^"]+\.xml)"', response.text)
+        
+        if not xml_pattern:
+            print(f"   No XML found in {filing_url}")
+            return {}
+        
+        xml_url = "https://www.sec.gov" + xml_pattern.group(1)
+        
+        time.sleep(0.15)
+        xml_response = requests.get(xml_url, headers=HEADERS, timeout=20)
+        
+        # Parse XML
+        root = ET.fromstring(xml_response.content)
+        
+        holdings = {}
+        
+        # Namespace può variare
+        ns = {'ns': root.tag.split('}')[0].strip('{')} if '}' in root.tag else {}
+        
+        # Cerca <infoTable> elements
+        for info_table in root.findall('.//infoTable') or root.findall('.//{*}infoTable'):
+            try:
+                name_elem = info_table.find('.//nameOfIssuer') or info_table.find('.//{*}nameOfIssuer')
+                ticker_elem = info_table.find('.//cusip') or info_table.find('.//{*}cusip')
+                shares_elem = info_table.find('.//shrsOrPrnAmt/sshPrnamt') or info_table.find('.//{*}sshPrnamt')
+                value_elem = info_table.find('.//value') or info_table.find('.//{*}value')
+                
+                if not all([name_elem, shares_elem, value_elem]):
+                    continue
+                
+                name = name_elem.text.strip() if name_elem.text else "Unknown"
+                cusip = ticker_elem.text.strip() if ticker_elem.text else ""
+                shares = int(shares_elem.text) if shares_elem.text else 0
+                value = int(value_elem.text) * 1000 if value_elem.text else 0  # SEC reports in thousands
+                
+                # Converti CUSIP in ticker (approssimazione - usa il nome company)
+                ticker = cusip[:6].upper()  # CUSIP primi 6 char
+                
+                holdings[ticker] = {
+                    'name': name,
+                    'shares': shares,
+                    'value': value,
+                    'cusip': cusip
+                }
+            except Exception as e:
+                continue
+        
+        return holdings
     
-    tax_keywords = ['tax', 'withholding', 'tax obligation', 'tax liability', 'tax withholding']
-    return any(keyword in comment for keyword in tax_keywords)
+    except Exception as e:
+        print(f"   Error parsing 13F XML: {e}")
+        return {}
+
+def compare_13f_holdings(current, previous):
+    """
+    Confronta 2 holdings 13F e ritorna: new, increased, decreased, closed
+    """
+    changes = {
+        'new': [],        # Nuove posizioni
+        'increased': [],  # Aumentate
+        'decreased': [],  # Diminuite
+        'closed': []      # Chiuse
+    }
+    
+    # Nuove e modificate
+    for ticker, curr_data in current.items():
+        if ticker not in previous:
+            changes['new'].append((ticker, curr_data))
+        else:
+            prev_value = previous[ticker]['value']
+            curr_value = curr_data['value']
+            change_pct = ((curr_value - prev_value) / prev_value * 100) if prev_value > 0 else 0
+            
+            if abs(change_pct) >= 25:  # Solo variazioni significative >25%
+                if change_pct > 0:
+                    changes['increased'].append((ticker, curr_data, change_pct))
+                else:
+                    changes['decreased'].append((ticker, curr_data, change_pct))
+    
+    # Chiuse
+    for ticker, prev_data in previous.items():
+        if ticker not in current:
+            changes['closed'].append((ticker, prev_data))
+    
+    return changes
 
 def format_congressional_message(trade, source):
-    """Formatta messaggio per trade congressional"""
     owner = trade.get('representative', trade.get('senator', 'N/A'))
     ticker = trade.get('ticker', 'N/A')
-    amount = trade.get('amount', 'N/A')
+    amount = parse_amount_range(trade.get('amount', 'N/A'))
     tx_type = trade.get('type', 'N/A')
     date = trade.get('transaction_date', trade.get('disclosure_date', 'N/A'))
     
-    vips = ['pelosi', 'trump', 'mcconnell', 'schumer', 'biden', 'warren', 'cruz', 'ocasio-cortez', 'aoc']
-    is_vip = any(vip in owner.lower() for vip in vips)
+    if 'purchase' in tx_type.lower():
+        action_emoji = "🟢 ACQUISTO"
+    elif 'sale' in tx_type.lower():
+        action_emoji = "🔴 VENDITA"
+    else:
+        action_emoji = "📊 " + tx_type.upper()
     
-    prefix = "🔥🔥 <b>VIP POLITICO</b> 🔥🔥" if is_vip else "🏛 <b>CONGRESSO</b>"
+    vips = ['pelosi', 'trump', 'mcconnell', 'schumer', 'biden', 'warren']
+    header = "⭐️ VIP POLITICO ⭐️" if any(v in owner.lower() for v in vips) else "🏛 POLITICO"
     
-    return f"""{prefix}
+    return f"""{header}
 
-👤 <b>{owner}</b>
+👤 Nome: <b>{owner}</b>
+🏢 Ruolo: Politico ({source})
+
+{action_emoji}
 📊 Ticker: <b>{ticker}</b>
-💰 Importo: {amount}
-📈 Tipo: {tx_type}
-📅 Data transazione: {date}
-🏢 Camera: {source}
+💰 Valore: {amount}
+📅 Data: {date}
 
 {trade.get('comment', '')}"""
 
-def format_sec_message(filing):
-    """Formatta messaggio per filing SEC"""
+def format_insider_form4_message(filing):
     title = filing['title']
-    form_type = filing['type']
-    link = filing['link']
-    date = filing['date']
+    company = extract_company_from_title(title)
+    ticker = extract_ticker_from_title(title)
+    
+    emoji = {"3": "🆕", "4": "📋", "5": "📅"}.get(filing['type'], "📄")
+    desc = {"3": "NUOVO INSIDER", "4": "INSIDER TRADING", "5": "REPORT ANNUALE"}.get(filing['type'], "FILING")
+    
+    msg = f"""{emoji} <b>{desc}</b>
+
+🏢 Company: <b>{company}</b>"""
+    if ticker:
+        msg += f"\n📊 Ticker: <b>{ticker}</b>"
+    
+    msg += f"""
+👤 Ruolo: Insider/Executive
+📅 Data: {filing['date']}
+
+🔗 <a href="{filing['link']}">Dettagli SEC</a>"""
+    
+    return msg
+
+def format_form13dg_message(filing):
+    title = filing['title']
+    company = extract_company_from_title(title)
+    ticker = extract_ticker_from_title(title)
+    
+    parts = title.split(' - ')
+    investor = parts[1].split('(')[0].strip() if len(parts) > 1 else "Investitore"
     
     is_notable = is_notable_investor(title)
+    is_amendment = '/A' in filing['type']
     
-    # Emoji e prefix basati sul tipo
-    if form_type == '3':
-        emoji = "🆕"
-        desc = "NUOVO INSIDER"
-    elif form_type == '4':
-        emoji = "📋"
-        desc = "INSIDER TRADING"
-    elif form_type == '5':
-        emoji = "📅"
-        desc = "INSIDER ANNUAL"
-    elif form_type in ['SC13D']:
-        emoji = "🚨"
-        desc = "ACQUISIZIONE ATTIVISTA (&gt;5%)"
-    elif form_type in ['SC13G', 'SC13G/A']:
-        emoji = "📊"
-        desc = "13G - ACQUISIZIONE/MODIFICA"
-    elif form_type == '13F-HR':
-        emoji = "💼"
-        desc = "13F - HOLDINGS TRIMESTRALE"
-    else:
-        emoji = "📄"
-        desc = "SEC FILING"
+    emoji = "📊" if is_amendment else "🚨"
+    desc = "MODIFICA POSIZIONE" if is_amendment else "ACQUISIZIONE >5%"
+    header = "⭐️⭐️ INVESTITORE FAMOSO ⭐️⭐️\n" if is_notable else ""
     
-    # Evidenzia investitori famosi
-    if is_notable:
-        prefix = f"⭐️⭐️ <b>INVESTITORE FAMOSO</b> ⭐️⭐️\n{emoji} <b>{desc}</b>"
-    else:
-        prefix = f"{emoji} <b>{desc}</b>"
-    
-    return f"""{prefix}
+    msg = f"""{header}{emoji} <b>{desc}</b>
 
-📄 {title}
-📅 Data filing: {date}
-🔗 <a href="{link}">Vedi filing SEC completo</a>"""
+👤 Investitore: <b>{investor}</b>
+🏢 Ruolo: Fondo/Istituzionale
+🎯 Target: <b>{company}</b>"""
+    
+    if ticker:
+        msg += f"\n📊 Ticker: <b>{ticker}</b>"
+    
+    msg += f"""
+📅 Data: {filing['date']}
+
+🔗 <a href="{filing['link']}">% esatta e dettagli</a>"""
+    
+    return msg
+
+def format_13f_detailed_message(fund_name, changes, total_value):
+    """Formato dettagliato per 13F con parsing completo"""
+    
+    msg = f"""⭐️⭐️ <b>13F - HOLDINGS TRIMESTRALE</b> ⭐️⭐️
+
+👤 Fondo: <b>{fund_name}</b>
+🏢 Ruolo: Investitore istituzionale
+💼 Valore totale portfolio: <b>{format_number(total_value)}</b>
+
+"""
+    
+    # Nuove posizioni
+    if changes['new']:
+        msg += "🆕 <b>NUOVE POSIZIONI</b>\n"
+        # Ordina per valore e prendi le top 10
+        top_new = sorted(changes['new'], key=lambda x: x[1]['value'], reverse=True)[:10]
+        for ticker, data in top_new:
+            pct = (data['value'] / total_value * 100) if total_value > 0 else 0
+            msg += f"  • <b>{ticker}</b> - {data['name'][:30]}\n"
+            msg += f"    💰 {format_number(data['value'])} ({pct:.1f}% ptf) | {data['shares']:,} azioni\n"
+        if len(changes['new']) > 10:
+            msg += f"  ... e altre {len(changes['new']) - 10} nuove posizioni\n"
+        msg += "\n"
+    
+    # Aumenti significativi
+    if changes['increased']:
+        msg += "📈 <b>AUMENTI SIGNIFICATIVI (&gt;25%)</b>\n"
+        top_inc = sorted(changes['increased'], key=lambda x: abs(x[2]), reverse=True)[:8]
+        for ticker, data, change_pct in top_inc:
+            pct = (data['value'] / total_value * 100) if total_value > 0 else 0
+            msg += f"  • <b>{ticker}</b> - {data['name'][:30]}\n"
+            msg += f"    📊 +{change_pct:.0f}% | {format_number(data['value'])} ({pct:.1f}% ptf)\n"
+        if len(changes['increased']) > 8:
+            msg += f"  ... e altri {len(changes['increased']) - 8} aumenti\n"
+        msg += "\n"
+    
+    # Riduzioni significative
+    if changes['decreased']:
+        msg += "📉 <b>RIDUZIONI SIGNIFICATIVE (&gt;25%)</b>\n"
+        top_dec = sorted(changes['decreased'], key=lambda x: abs(x[2]), reverse=True)[:8]
+        for ticker, data, change_pct in top_dec:
+            pct = (data['value'] / total_value * 100) if total_value > 0 else 0
+            msg += f"  • <b>{ticker}</b> - {data['name'][:30]}\n"
+            msg += f"    📊 {change_pct:.0f}% | {format_number(data['value'])} ({pct:.1f}% ptf)\n"
+        if len(changes['decreased']) > 8:
+            msg += f"  ... e altre {len(changes['decreased']) - 8} riduzioni\n"
+        msg += "\n"
+    
+    # Posizioni chiuse
+    if changes['closed']:
+        msg += "❌ <b>POSIZIONI CHIUSE</b>\n"
+        top_closed = sorted(changes['closed'], key=lambda x: x[1]['value'], reverse=True)[:8]
+        for ticker, data in top_closed:
+            msg += f"  • <b>{ticker}</b> - {data['name'][:30]} ({format_number(data['value'])})\n"
+        if len(changes['closed']) > 8:
+            msg += f"  ... e altre {len(changes['closed']) - 8} chiusure\n"
+    
+    if not any([changes['new'], changes['increased'], changes['decreased'], changes['closed']]):
+        msg += "ℹ️ Nessuna variazione significativa rispetto al trimestre precedente"
+    
+    return msg
 
 def main():
     seen = load_seen()
     new_seen = seen.copy()
+    cache_13f = load_json_file(CACHE_13F_FILE)
     sent_count = 0
     
     print(f"\n{'='*60}")
     print(f"🤖 INSIDER BOT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}\n")
     
-    # ========== 1. CONGRESSIONAL TRADES ==========
-    print("📊 Checking Congressional trades...")
-    house_trades = check_congressional_trades()
-    senate_trades = check_senate_trades()
-    
-    print(f"   Found {len(house_trades)} House + {len(senate_trades)} Senate trades")
-    
-    for trade in house_trades:
-        trade_id = f"house_{trade.get('representative')}_{trade.get('ticker')}_{trade.get('transaction_date')}"
-        
-        if trade_id in seen:
-            continue
-            
-        if is_tax_payment(trade):
-            print(f"   ⏭ Skipped (tax): {trade_id}")
-            continue
-        
-        try:
-            message = format_congressional_message(trade, 'House of Representatives')
-            if send_telegram(message):
+    # Congressional
+    print("📊 Congressional...")
+    for trade in check_congressional_trades() + check_senate_trades():
+        source = 'House' if 'representative' in trade else 'Senate'
+        trade_id = f"{source}_{trade.get('representative', trade.get('senator'))}_{trade.get('ticker')}_{trade.get('transaction_date')}"
+        if trade_id not in seen and not is_tax_payment(trade):
+            if send_telegram(format_congressional_message(trade, source)):
                 new_seen.add(trade_id)
                 sent_count += 1
-                print(f"   ✅ Sent: {trade.get('representative')} - {trade.get('ticker')}")
                 time.sleep(1)
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
     
-    for trade in senate_trades:
-        trade_id = f"senate_{trade.get('senator')}_{trade.get('ticker')}_{trade.get('transaction_date')}"
-        
-        if trade_id in seen:
-            continue
-            
-        if is_tax_payment(trade):
-            print(f"   ⏭ Skipped (tax): {trade_id}")
-            continue
-        
-        try:
-            message = format_congressional_message(trade, 'Senate')
-            if send_telegram(message):
-                new_seen.add(trade_id)
-                sent_count += 1
-                print(f"   ✅ Sent: {trade.get('senator')} - {trade.get('ticker')}")
-                time.sleep(1)
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-    
-    # ========== 2. FORM 3 (New Insiders) ==========
-    print("\n🆕 Checking Form 3 (New Insiders)...")
-    form3_filings = check_form3()
-    print(f"   Found {len(form3_filings)} Form 3 filings")
-    
-    for filing in form3_filings:
-        filing_id = f"form3_{filing['link']}"
-        
-        if filing_id in seen:
-            continue
-        
-        try:
-            message = format_sec_message(filing)
-            if send_telegram(message):
-                new_seen.add(filing_id)
-                sent_count += 1
-                print(f"   ✅ Sent: {filing['title'][:60]}")
-                time.sleep(1)
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-    
-    # ========== 3. FORM 4 (Insider Trading) ==========
-    print("\n📋 Checking Form 4 (Insider Transactions)...")
-    form4_filings = check_form4()
-    print(f"   Found {len(form4_filings)} Form 4 filings")
-    
-    for filing in form4_filings:
-        filing_id = f"form4_{filing['link']}"
-        
-        if filing_id in seen:
-            continue
-        
-        try:
-            message = format_sec_message(filing)
-            if send_telegram(message):
-                new_seen.add(filing_id)
-                sent_count += 1
-                print(f"   ✅ Sent: {filing['title'][:60]}")
-                time.sleep(1)
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-    
-    # ========== 4. FORM 5 (Annual Insider) ==========
-    print("\n📅 Checking Form 5 (Annual Insider)...")
-    form5_filings = check_form5()
-    print(f"   Found {len(form5_filings)} Form 5 filings")
-    
-    for filing in form5_filings:
-        filing_id = f"form5_{filing['link']}"
-        
-        if filing_id in seen:
-            continue
-        
-        try:
-            message = format_sec_message(filing)
-            if send_telegram(message):
-                new_seen.add(filing_id)
-                sent_count += 1
-                print(f"   ✅ Sent: {filing['title'][:60]}")
-                time.sleep(1)
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-    
-    # ========== 5. FORM 13D (Activist >5%) ==========
-    print("\n🚨 Checking Form 13D (Activist Acquisitions)...")
-    form13d_filings = check_form13d()
-    print(f"   Found {len(form13d_filings)} Form 13D filings")
-    
-    for filing in form13d_filings:
-        filing_id = f"form13d_{filing['link']}"
-        
-        if filing_id in seen:
-            continue
-        
-        try:
-            message = format_sec_message(filing)
-            if send_telegram(message):
-                new_seen.add(filing_id)
-                sent_count += 1
-                notable = "⭐️ NOTABLE" if is_notable_investor(filing['title']) else ""
-                print(f"   ✅ Sent {notable}: {filing['title'][:60]}")
-                time.sleep(1)
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-    
-    # ========== 6. FORM 13G/13G/A (Passive acquisitions + amendments) ==========
-    print("\n📊 Checking Form 13G/A (Passive Acquisitions & Changes)...")
-    form13g_filings = check_form13g()
-    print(f"   Found {len(form13g_filings)} Form 13G/A filings")
-    
-    for filing in form13g_filings:
-        filing_id = f"form13g_{filing['link']}"
-        
-        if filing_id in seen:
-            continue
-        
-        # Priorità agli investitori famosi
-        is_notable = is_notable_investor(filing['title'])
-        
-        try:
-            message = format_sec_message(filing)
-            if send_telegram(message):
-                new_seen.add(filing_id)
-                sent_count += 1
-                notable = "⭐️ NOTABLE" if is_notable else ""
-                print(f"   ✅ Sent {notable}: {filing['title'][:60]}")
-                time.sleep(1)
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-    
-    # ========== 7. FORM 13F-HR (Quarterly Holdings) ==========
-    print("\n💼 Checking Form 13F-HR (Quarterly Fund Holdings)...")
-    form13f_filings = check_form13f()
-    print(f"   Found {len(form13f_filings)} Form 13F filings")
-    
-    for filing in form13f_filings:
-        filing_id = f"form13f_{filing['link']}"
-        
-        if filing_id in seen:
-            continue
-        
-        # Solo investitori famosi per 13F (altrimenti troppo spam)
-        if is_notable_investor(filing['title']):
-            try:
-                message = format_sec_message(filing)
-                if send_telegram(message):
+    # Form 3/4/5
+    print("\n📋 Insider Trading...")
+    for form_type in ['3', '4', '5']:
+        for filing in check_sec_filings(form_type, days_back=3 if form_type != '4' else 2):
+            filing_id = f"form{form_type}_{filing['link']}"
+            if filing_id not in seen:
+                if send_telegram(format_insider_form4_message(filing)):
                     new_seen.add(filing_id)
                     sent_count += 1
-                    print(f"   ✅ Sent ⭐️: {filing['title'][:60]}")
                     time.sleep(1)
-            except Exception as e:
-                print(f"   ❌ Error: {e}")
-        else:
-            # Marca come visto ma non inviare (troppo spam)
+    
+    # Form 13D/G
+    print("\n📊 13D/G...")
+    for form_type in ['SC13D', 'SC13G', 'SC13G/A']:
+        for filing in check_sec_filings(form_type, days_back=5, count=40):
+            filing_id = f"{form_type}_{filing['link']}"
+            if filing_id not in seen:
+                if send_telegram(format_form13dg_message(filing)):
+                    new_seen.add(filing_id)
+                    sent_count += 1
+                    time.sleep(1)
+    
+    # Form 13F (CON PARSING COMPLETO)
+    print("\n💼 13F (Full Parsing)...")
+    filings = check_sec_filings('13F-HR', days_back=7, count=200)
+    
+    for filing in filings:
+        filing_id = f"13f_{filing['link']}"
+        
+        if filing_id in seen:
+            continue
+        
+        # Solo investitori famosi
+        if not is_notable_investor(filing['title']):
             new_seen.add(filing_id)
+            continue
+        
+        fund_name = extract_company_from_title(filing['title'])
+        
+        print(f"   Parsing {fund_name}...")
+        
+        # Scarica e parsa 13F corrente
+        current_holdings = parse_13f_xml(filing['link'])
+        
+        if not current_holdings:
+            print(f"   Failed to parse, sending simple alert")
+            # Fallback: invia notifica semplice
+            msg = f"""⭐️ <b>13F - HOLDINGS TRIMESTRALE</b>
+
+👤 Fondo: <b>{fund_name}</b>
+📅 Data: {filing['date']}
+
+🔗 <a href="{filing['link']}">Vedi tutte le posizioni</a>"""
+            send_telegram(msg)
+            new_seen.add(filing_id)
+            sent_count += 1
+            time.sleep(1)
+            continue
+        
+        # Calcola valore totale
+        total_value = sum(h['value'] for h in current_holdings.values())
+        
+        # Cerca 13F precedente in cache
+        previous_holdings = cache_13f.get(fund_name, {})
+        
+        # Confronta
+        changes = compare_13f_holdings(current_holdings, previous_holdings)
+        
+        # Invia notifica dettagliata
+        msg = format_13f_detailed_message(fund_name, changes, total_value)
+        
+        if send_telegram(msg):
+            new_seen.add(filing_id)
+            sent_count += 1
+            print(f"   ✅ Sent detailed 13F for {fund_name}")
+            
+            # Salva in cache per il prossimo trimestre
+            cache_13f[fund_name] = current_holdings
+            save_json_file(CACHE_13F_FILE, cache_13f)
+            
+            time.sleep(2)  # Pausa più lunga per messaggi lunghi
     
-    # ========== SALVA E SUMMARY ==========
     save_seen(new_seen)
-    
     print(f"\n{'='*60}")
-    print(f"✅ COMPLETATO")
-    print(f"   Nuovi alert inviati: {sent_count}")
-    print(f"   Totale tracking: {len(new_seen)} transazioni")
+    print(f"✅ Sent {sent_count} alerts")
     print(f"{'='*60}\n")
 
 if __name__ == '__main__':
