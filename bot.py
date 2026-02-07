@@ -43,7 +43,13 @@ def save_json_file(filepath, data):
         json.dump(data, f)
 
 def load_seen():
-    return set(load_json_file(SEEN_FILE).get('seen', []))
+    data = load_json_file(SEEN_FILE)
+    if isinstance(data, dict):
+        return set(data.get('seen', []))
+    elif isinstance(data, list):
+        return set(data)
+    else:
+        return set()
 
 def save_seen(seen):
     save_json_file(SEEN_FILE, {'seen': list(seen)})
