@@ -34,6 +34,6 @@ jobs:
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
-        git add seen_transactions.json
-        git diff --quiet && git diff --staged --quiet || git commit -m "Update seen transactions"
+        git add seen_transactions.json cache_13f.json
+        git diff --quiet && git diff --staged --quiet || git commit -m "Update tracking files"
         git push
