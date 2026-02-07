@@ -69,12 +69,13 @@ def send_telegram(message):
                 })
                 time.sleep(0.5)
         else:
-            requests.post(url, json={...}, timeout=10)
+            requests.post(url, json={
                 'chat_id': CHAT_ID,
                 'text': message,
                 'parse_mode': 'HTML',
                 'disable_web_page_preview': True
-            })
+            }, timeout=10)
+            
         return True
     except Exception as e:
         print(f"Telegram error: {e}")
